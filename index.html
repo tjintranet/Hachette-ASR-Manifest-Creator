@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hachette Email to Excel Importer</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.2/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    
+    <!-- Favicon -->
+        <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+        <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+        
+</head>
+<body class="bg-light">
+    <div class="container py-4">
+        <div class="card shadow">
+            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                <h4 class="mb-0">Hachette Email to Excel Importer</h4>
+                <div class="d-flex align-items-center">
+                    <button type="button" class="btn btn-outline-light me-2" onclick="parseData()">Parse Data</button>
+                    <button type="button" class="btn btn-outline-light" onclick="clearData()">Clear Data</button>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-info">
+                    <strong>Instructions:</strong> Copy the order data from your email and paste it into the text area below. Click "Parse Data" to preview, then "Download Excel" to save.
+                </div>
+                
+                <div class="mb-3">
+                    <label for="emailData" class="form-label">Paste Email Data</label>
+                    <textarea class="form-control" id="emailData" rows="10" style="font-family: 'Courier New', monospace; font-size: 13px;" placeholder="Paste your comma-separated order data here...
+
+Example:
+Publisher,PO,ISBN,Title,Full Parcel Qty,Full Parcel Size,Part Parcel,Total Qty,Special Instructions
+HODDER [SHORT RUN],HA00458786,9780340897508,ASR DEATH OF A RED HEROINE,2,40,0,80,Actual"></textarea>
+                </div>
+                
+                <div class="alert" id="statusMessage" style="display: none;"></div>
+                
+                <div id="previewContainer" style="display: none;">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="mb-0">Data Preview</h5>
+                        <span id="recordCount" class="badge bg-primary">0 records</span>
+                    </div>
+                    
+                    <div class="table-responsive">
+                        <table class="table table-bordered table-hover" id="previewTable">
+                            <thead class="table-light" id="tableHead"></thead>
+                            <tbody id="tableBody"></tbody>
+                        </table>
+                    </div>
+                    
+                    <div class="d-grid gap-2">
+                        <button class="btn btn-success" onclick="downloadExcel()">
+                            Download Excel File
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let parsedData = [];
+
+        function showStatus(message, type) {
+            const statusEl = document.getElementById('statusMessage');
+            statusEl.textContent = message;
+            statusEl.className = `alert alert-${type}`;
+            statusEl.style.display = 'block';
+            
+            if (type === 'success' || type === 'info') {
+                setTimeout(() => {
+                    statusEl.style.display = 'none';
+                }, 3000);
+            }
+        }
+
+        function clearData() {
+            document.getElementById('emailData').value = '';
+            document.getElementById('previewContainer').style.display = 'none';
+            document.getElementById('statusMessage').style.display = 'none';
+            parsedData = [];
+        }
+
+        function parseData() {
+            const emailText = document.getElementById('emailData').value.trim();
+            
+            if (!emailText) {
+                showStatus('Please paste some data first', 'error');
+                return;
+            }
+
+            try {
+                let lines;
+                
+                // Check if data has line breaks or is all run together
+                if (emailText.includes('\n')) {
+                    // Normal line-separated data
+                    lines = emailText.split('\n').filter(line => line.trim());
+                } else {
+                    // Data is run together - need to split it intelligently
+                    lines = splitRunTogetherData(emailText);
+                }
+                
+                if (lines.length < 2) {
+                    showStatus('Data must include at least a header row and one data row', 'error');
+                    return;
+                }
+
+                // Parse header
+                const headers = parseCSVLine(lines[0]);
+                
+                // Parse data rows
+                parsedData = [];
+                for (let i = 1; i < lines.length; i++) {
+                    const values = parseCSVLine(lines[i]);
+                    if (values.length > 0) {
+                        const row = {};
+                        headers.forEach((header, index) => {
+                            row[header] = values[index] || '';
+                        });
+                        parsedData.push(row);
+                    }
+                }
+
+                if (parsedData.length === 0) {
+                    showStatus('No valid data rows found', 'error');
+                    return;
+                }
+
+                // Display preview
+                displayPreview(headers, parsedData);
+                showStatus(`Successfully parsed ${parsedData.length} record(s)`, 'success');
+
+            } catch (error) {
+                showStatus(`Error parsing data: ${error.message}`, 'error');
+                console.error(error);
+            }
+        }
+
+        function splitRunTogetherData(text) {
+            // Expected column headers for Hachette orders
+            const expectedHeaders = ['Publisher', 'PO', 'ISBN', 'Title', 'Full Parcel Qty', 'Full Parcel Size', 'Part Parcel', 'Total Qty', 'Special Instructions'];
+            
+            // Find where the header ends (after "Special Instructions")
+            const headerEndMarker = 'Special Instructions';
+            const headerEndIndex = text.indexOf(headerEndMarker);
+            
+            if (headerEndIndex === -1) {
+                // Try alternative approach - split by known publisher patterns
+                return splitByPublisherPattern(text);
+            }
+            
+            const headerEnd = headerEndIndex + headerEndMarker.length;
+            const header = text.substring(0, headerEnd);
+            const dataSection = text.substring(headerEnd);
+            
+            // Split data by publisher names (they typically appear at the start of each row)
+            // Look for patterns like "HODDER", "JOHN MURRAY", "ORION", "LITTLE BROWN"
+            const publisherPattern = /(?=HODDER|JOHN MURRAY|ORION|LITTLE BROWN|HACHETTE)/g;
+            const matches = [...dataSection.matchAll(publisherPattern)];
+            
+            const lines = [header];
+            
+            for (let i = 0; i < matches.length; i++) {
+                const start = matches[i].index;
+                const end = i < matches.length - 1 ? matches[i + 1].index : dataSection.length;
+                const row = dataSection.substring(start, end).trim();
+                if (row) {
+                    lines.push(row);
+                }
+            }
+            
+            return lines;
+        }
+
+        function splitByPublisherPattern(text) {
+            // Fallback method: split by known publisher patterns
+            const lines = [];
+            const publisherPattern = /(HODDER \[SHORT RUN\]|JOHN MURRAY|ORION PUBLISHING GROUP|LITTLE BROWN BOOK GROUP S\/RUN|HACHETTE)/g;
+            
+            let lastIndex = 0;
+            let match;
+            let firstMatch = true;
+            
+            while ((match = publisherPattern.exec(text)) !== null) {
+                if (firstMatch) {
+                    // First match - everything before is the header
+                    lines.push(text.substring(0, match.index));
+                    firstMatch = false;
+                }
+                
+                if (lastIndex > 0) {
+                    // Add the previous row
+                    lines.push(text.substring(lastIndex, match.index));
+                }
+                
+                lastIndex = match.index;
+            }
+            
+            // Add the last row
+            if (lastIndex > 0) {
+                lines.push(text.substring(lastIndex));
+            }
+            
+            return lines.filter(line => line.trim());
+        }
+
+        function parseCSVLine(line) {
+            // Simple CSV parser that handles commas in data
+            const result = [];
+            let current = '';
+            let inQuotes = false;
+
+            for (let i = 0; i < line.length; i++) {
+                const char = line[i];
+                
+                if (char === '"') {
+                    inQuotes = !inQuotes;
+                } else if (char === ',' && !inQuotes) {
+                    result.push(current.trim());
+                    current = '';
+                } else {
+                    current += char;
+                }
+            }
+            
+            result.push(current.trim());
+            return result;
+        }
+
+        function displayPreview(headers, data) {
+            const previewContainer = document.getElementById('previewContainer');
+            const tableHead = document.getElementById('tableHead');
+            const tableBody = document.getElementById('tableBody');
+            const recordCount = document.getElementById('recordCount');
+
+            // Clear existing content
+            tableHead.innerHTML = '';
+            tableBody.innerHTML = '';
+
+            // Create header row
+            const headerRow = document.createElement('tr');
+            headers.forEach(header => {
+                const th = document.createElement('th');
+                th.textContent = header;
+                headerRow.appendChild(th);
+            });
+            tableHead.appendChild(headerRow);
+
+            // Create data rows (limit to first 50 for performance)
+            const displayData = data.slice(0, 50);
+            displayData.forEach(row => {
+                const tr = document.createElement('tr');
+                headers.forEach(header => {
+                    const td = document.createElement('td');
+                    td.textContent = row[header] || '';
+                    tr.appendChild(td);
+                });
+                tableBody.appendChild(tr);
+            });
+
+            // Update record count
+            recordCount.textContent = `${data.length} record${data.length !== 1 ? 's' : ''}`;
+            if (data.length > 50) {
+                recordCount.textContent += ' (showing first 50)';
+            }
+
+            // Show preview
+            previewContainer.style.display = 'block';
+        }
+
+        function downloadExcel() {
+            if (parsedData.length === 0) {
+                showStatus('No data to export', 'error');
+                return;
+            }
+
+            try {
+                // Create workbook
+                const wb = XLSX.utils.book_new();
+                
+                // Convert data to worksheet
+                const ws = XLSX.utils.json_to_sheet(parsedData);
+
+                // Set column widths
+                const colWidths = [
+                    { wch: 25 }, // Publisher
+                    { wch: 15 }, // PO
+                    { wch: 15 }, // ISBN
+                    { wch: 50 }, // Title
+                    { wch: 15 }, // Full Parcel Qty
+                    { wch: 15 }, // Full Parcel Size
+                    { wch: 12 }, // Part Parcel
+                    { wch: 12 }, // Total Qty
+                    { wch: 20 }  // Special Instructions
+                ];
+                ws['!cols'] = colWidths;
+
+                // Add worksheet to workbook
+                XLSX.utils.book_append_sheet(wb, ws, 'Hachette Orders');
+
+                // Generate filename with timestamp
+                const timestamp = new Date().toISOString().slice(0, 10);
+                const filename = `Hachette_Orders_${timestamp}.xlsx`;
+
+                // Download file
+                XLSX.writeFile(wb, filename);
+                
+                showStatus(`Excel file downloaded: ${filename}`, 'success');
+
+            } catch (error) {
+                showStatus(`Error creating Excel file: ${error.message}`, 'error');
+                console.error(error);
+            }
+        }
+
+        // Add keyboard shortcut for parsing (Ctrl/Cmd + Enter)
+        document.getElementById('emailData').addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                parseData();
+            }
+        });
+    </script>
+</body>
+</html>
